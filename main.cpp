@@ -1,98 +1,181 @@
-#include <gtest/gtest.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include "bam.hpp"
+#include <sstream>
+#include <boost/algorithm/string/find.hpp>
+#include "sam.hpp"
+#include "fasta.hpp"
+#include "interval.hpp"
+#include "read_filter.hpp"
+#include "interval.hpp"
+#include "assembler.hpp"
+#include "read_clipper.hpp"
 #include "smithwaterman.hpp"
+#include "pairhmm.hpp"
+#include <random>
+#include "genetyper.hpp"
 
-SWAligner aligner;
-using namespace std::string_literals;
+using namespace biovoltron::format;
+using namespace hc;
 
-TEST(SWAligner, degenerate_alignment_with_indels_at_both_ends)
+static const std::string ref_prefix = "ref/";
+static const std::string output_prefix = "output/";
+static const auto bam_path = "input/hg19.bam";
+static const auto bai_path = "input/hg19.bam.bai";
+
+void call_region(std::vector<SAMRecord>& reads,
+                 std::string_view ref,
+                 const Interval& padded_region,
+                 const Interval& origin_region,
+                 std::size_t max_reads_on_assembly_region,
+                 std::ostream& os);
+
+void do_work(const Interval& process_region,
+             std::size_t assembly_region_size = 245,
+             std::size_t assembly_region_padding_size = 85,
+             std::size_t max_reads_on_assembly_region = 200)
 {
-    auto ref = "TGTGTGTGTGTGTGACAGAGAGAGAGAGAGAGAGAGAGAGAGAGA"s;
-    auto alt =               "ACAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGAGA"s;
-    auto [offset, cigar] = aligner.align(ref, alt, SWAligner::STANDARD_NGS);
-    EXPECT_EQ(offset, 14);
-    EXPECT_EQ(to_string(cigar), "31M20S");
-}
+    const auto chromosome = process_region.contig;
+    const auto fasta_path = ref_prefix + chromosome + ".fa";
+    const auto vcf_path   = output_prefix + process_region.to_string() + ".vcf";
 
-TEST(SWAligner, sub_string_match)
-{
-    auto ref = "AAACCCCC"s;
-    auto alt = "CCCCC"s;
-    auto [offset, cigar] = aligner.align(ref, alt, SWAligner::ORIGINAL_DEFAULT);
-    EXPECT_EQ(offset, 3);
-    EXPECT_EQ(to_string(cigar), "5M");
-}
+    auto process_padded_region = process_region;
+    process_padded_region.end += assembly_region_padding_size;
+    if (process_region.begin > assembly_region_padding_size) process_padded_region.begin -= assembly_region_padding_size;
+    else process_padded_region.begin = 0;
 
-TEST(SWAligner, sub_string_match_long)
-{
-    auto ref = "ATAGAAAATAGTTTTTGGAAATATGGGTGAAGAGACATCTCCTCTTATGGAAAAAGGGATTCTAGAATTTAACAATAAATATTCCCAACTTTCCCCAAGGCTTTAAAATCTACCTTGAAGGAGCAGCTGATGTATTTCTAGAACAGACTTAGGTGTCTTGGTGTGGCCTGTAAAGAGATACTGTCTTTCTCTTTTGAGTGTAAGAGAGAAAGGACAGTCTACTCAATAAAGAGTGCTGGGAAAACTGAATATCCACACACAGAATAATAAAACTAGATCCTATCTCTCACCATATACAAAGATCAACTCAAAACAAATTAAAGACCTAAATGTAAGACAAGAAATTATAAAACTACTAGAAAAAAACACAAGGGAAATGCTTCAGGACATTGGC"s;
-    auto alt = "AAAAAAA"s;
-    auto [offset, cigar] = aligner.align(ref, alt, SWAligner::ORIGINAL_DEFAULT);
-    EXPECT_EQ(offset, 359);
-    EXPECT_EQ(to_string(cigar), "7M");
-}
-
-TEST(SWAligner, complex_read_aligned_to_ref)
-{
-    auto ref = "AAAGGACTGACTG"s;
-    auto alt =  "ACTGACTGACTG"s;
-    auto [offset, cigar] = aligner.align(ref, alt, SWAligner::ORIGINAL_DEFAULT);
-    EXPECT_EQ(offset, 1);
-    EXPECT_EQ(to_string(cigar), "12M");
-}
-
-TEST(SWAligner, odd_no_alignment)
-{
-    auto ref = "AAAGACTACTG"s;
-    auto alt = "AACGGACACTG"s;
-    auto [offset1, cigar1] = aligner.align(ref, alt, {50, -100, -220, -12});
-    EXPECT_EQ(offset1, 1);
-    EXPECT_EQ(to_string(cigar1), "2M2I3M1D4M");
-
-    auto [offset2, cigar2] = aligner.align(ref, alt, {200, -50, -300, -22});
-    EXPECT_EQ(offset2, 0);
-    EXPECT_EQ(to_string(cigar2), "11M");
-}
-
-TEST(SWAligner, indels_at_start_and_end)
-{
-    auto ref = "AAACCCCC"s;
-    auto alt = "CCCCCGGG"s;
-    auto [offset, cigar] = aligner.align(ref, alt, SWAligner::ORIGINAL_DEFAULT);
-    EXPECT_EQ(offset, 3);
-    EXPECT_EQ(to_string(cigar), "5M3S");
-}
-
-TEST(SWAligner, identical_alignments_with_differing_flank_lengths)
-{
-    auto padded_ref = "GCGTCGCAGTCTTAAGGCCCCGCCTTTTCAGACAGCTTCCGCTGGGCCTGGGCCGCTGCGGGGCGGTCACGGCCCCTTTAAGCCTGAGCCCCGCCCCCTGGCTCCCCGCCCCCTCTTCTCCCCTCCCCCAAGCCAGCACCTGGTGCCCCGGCGGGTCGTGCGGCGCGGCGCTCCGCGGTGAGCGCCTGACCCCGAGGGGGCCCGGGGCCGCGTCCCTGGGCCCTCCCCACCCTTGCGGTGGCCTCGCGGGTCCCAGGGGCGGGGCTGGAGCGGCAGCAGGGCCGGGGAGATGGGCGGTGGGGAGCGCGGGAGGGACCGGGCCGAGCCGGGGGAAGGGCTCCGGTGACT"s;
-    auto padded_alt = "GCGTCGCAGTCTTAAGGCCCCGCCTTTTCAGACAGCTTCCGCTGGGCCTGGGCCGCTGCGGGGCGGTCACGGCCCCTTTAAGCCTGAGCCCCGCCCCCTGGCTCCCCGCCCCCTCTTCTCCCCTCCCCCAAGCCAGCACCTGGTGCCCCGGCGGGTCGTGCGGCGCGGCGCTCCGCGGTGAGCGCCTGACCCCGA--GGGCC---------------GGGCCCTCCCCACCCTTGCGGTGGCCTCGCGGGTCCCAGGGGCGGGGCTGGAGCGGCAGCAGGGCCGGGGAGATGGGCGGTGGGGAGCGCGGGAGGGACCGGGCCGAGCCGGGGGAAGGGCTCCGGTGACT"s;
-    padded_alt.erase(std::remove(padded_alt.begin(), padded_alt.end(), '-'), padded_alt.end());
-
-    auto not_padded_ref = "CTTTAAGCCTGAGCCCCGCCCCCTGGCTCCCCGCCCCCTCTTCTCCCCTCCCCCAAGCCAGCACCTGGTGCCCCGGCGGGTCGTGCGGCGCGGCGCTCCGCGGTGAGCGCCTGACCCCGAGGGGGCCCGGGGCCGCGTCCCTGGGCCCTCCCCACCCTTGCGGTGGCCTCGCGGGTCCCAGGGGCGGGGCTGGAGCGGCAGCAGGGCCGGGGAGATGGGCGGTGGGGAGCGCGGGAGGGA"s;
-    auto not_padded_alt = "CTTTAAGCCTGAGCCCCGCCCCCTGGCTCCCCGCCCCCTCTTCTCCCCTCCCCCAAGCCAGCACCTGGTGCCCCGGCGGGTCGTGCGGCGCGGCGCTCCGCGGTGAGCGCCTGACCCCGA---------GGGCC--------GGGCCCTCCCCACCCTTGCGGTGGCCTCGCGGGTCCCAGGGGCGGGGCTGGAGCGGCAGCAGGGCCGGGGAGATGGGCGGTGGGGAGCGCGGGAGGGA"s;
-    not_padded_alt.erase(std::remove(not_padded_alt.begin(), not_padded_alt.end(), '-'), not_padded_alt.end());
-
-    auto SW_PAD = "NNNNNNNNNN"s;
-    auto paddeds_ref = SW_PAD + padded_ref + SW_PAD;
-    auto paddeds_alt = SW_PAD + padded_alt + SW_PAD;
-    auto not_paddeds_ref = SW_PAD + not_padded_ref + SW_PAD;
-    auto not_paddeds_alt = SW_PAD + not_padded_alt + SW_PAD;
-
-    auto [padded_offset, padded_cigar] = aligner.align(paddeds_ref, paddeds_alt, SWAligner::NEW_SW_PARAMETERS);
-    auto [not_padded_offset, not_padded_cigar] = aligner.align(not_paddeds_ref, not_paddeds_alt, SWAligner::NEW_SW_PARAMETERS);
-
-    EXPECT_EQ(padded_cigar.size(), not_padded_cigar.size());
-    for (std::size_t i = 0; i < padded_cigar.size(); i++)
+    auto process_region_ref = std::string{};
     {
-        auto [size1, op1] = padded_cigar[i];
-        auto [size2, op2] = not_padded_cigar[i];
-        if (op1 == 'M' && op2 == 'M') continue;
-        EXPECT_EQ(size1, size2);
-        EXPECT_EQ(op1, op2);
+        auto fasta_record = biovoltron::format::Fasta{};
+        std::ifstream ifs(fasta_path);
+        ifs >> fasta_record;
+        process_region_ref = fasta_record.seq.substr(process_padded_region.begin, process_padded_region.size());
+    }
+    std::transform(process_region_ref.begin(), process_region_ref.end(), process_region_ref.begin(), ::toupper);
+    auto ref = std::string_view{process_region_ref};
+
+    std::size_t ref_index{};
+    {
+        std::ifstream ifs(bam_path);
+        bam::Header bam_header(ifs);
+        auto& ref_vec = bam_header.get_member<bam::HEADER_INDEX::REFERENCE>();
+        for (std::size_t i = 0; i < ref_vec.size(); i++)
+        {
+            if (std::get<bam::REFERENCE_INDEX::REFERENCE_NAME>(ref_vec[i]) == chromosome)
+            {
+                ref_index = i;
+                break;
+            }
+        }
+    }
+
+    auto windows_number = process_region.size() / assembly_region_size + (process_region.size() % assembly_region_size ? 1 : 0);
+
+    auto origin_region = Interval{process_region.contig, process_region.begin, process_region.begin + assembly_region_size};
+    auto padded_region = Interval{process_region.contig, process_padded_region.begin, origin_region.end + assembly_region_padding_size};
+
+    std::ofstream ofs(vcf_path);
+    for (std::size_t i = 0; i < windows_number; i++)
+    {
+        auto region_ref = ref.substr(padded_region.begin - process_padded_region.begin, padded_region.size());
+
+        std::ifstream ifs(bam_path);
+        bam::Header bam_header(ifs);
+        bam::BAM bam(bam_header);
+        bam::BAI bai(bai_path);
+        bai.set_region({ref_index, padded_region.begin, ref_index, padded_region.end - 1});
+        bam::BAM::get_obj(ifs, bam, bai);
+        std::vector<SAMRecord> reads;
+        while (bam)
+        {
+            auto bam_string = bam.to_string();
+            auto clean_bam_string = bam_string.substr(0, static_cast<std::size_t>(
+                std::distance(bam_string.begin(), boost::find_nth(bam_string, "\t", 10).end())) - 1);
+            std::istringstream iss(clean_bam_string);
+            SAMRecord record;
+            iss >> record;
+            reads.push_back(record);
+            bam::BAM::get_obj(ifs, bam, bai);
+        }
+        if (reads.empty()) std::cout << "Ignore " << origin_region.to_string() << ":    (with overlap region = " << padded_region.to_string() << ")\n";
+        else call_region(reads, region_ref, padded_region, origin_region, max_reads_on_assembly_region, ofs);
+
+        origin_region.begin += assembly_region_size;
+        origin_region.end   += assembly_region_size;
+        padded_region.begin  = origin_region.begin - assembly_region_padding_size;
+        padded_region.end    = origin_region.end   + assembly_region_padding_size;
+    }
+    std::cout << "HaplotypeCaller done." << '\n';
+}
+
+int main(int argc, char *argv[])
+{
+    do_work(argv[1]);
+    //do_work("chrM:0-16571");
+}
+
+void filter_reads(std::vector<SAMRecord>& reads)
+{
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        MappingQualityReadFilter{}
+    ), reads.end());
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        DuplicateReadFilter{}
+    ), reads.end());
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        SecondaryAlignmentReadFilter{}
+    ), reads.end());
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        MateOnSameContigReadFilter{}
+    ), reads.end());
+}
+
+void hard_clip_reads(std::vector<SAMRecord>& reads, const Interval& padded_region)
+{
+    std::for_each(reads.begin(), reads.end(), ReadClipper::hard_clip_soft_clipped_bases);
+    std::for_each(reads.begin(), reads.end(), [&](auto& read){
+        ReadClipper::hard_clip_to_interval(read, padded_region);
+    });
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        MinimumLengthReadFilter{}
+    ), reads.end());
+}
+
+void sample_reads(std::vector<SAMRecord>& reads, std::size_t n)
+{
+    if (reads.size() > n)
+    {
+        std::vector<SAMRecord> temp;
+        std::sample(reads.begin(), reads.end(), std::back_inserter(temp), n, std::mt19937{std::random_device{}()});
+        reads.swap(temp);
     }
 }
 
-int main()
+void call_region(std::vector<SAMRecord>& reads,
+                 std::string_view ref,
+                 const Interval& padded_region,
+                 const Interval& origin_region,
+                 std::size_t max_reads_on_assembly_region,
+                 std::ostream& os)
 {
-    return RUN_ALL_TESTS();
+    Assembler assembler;
+    PairHMM pairhmm;
+    Genetyper genetyper;
+
+    filter_reads(reads);
+    hard_clip_reads(reads, padded_region);
+    sample_reads(reads, max_reads_on_assembly_region);
+    if (reads.empty()) return;
+    std::cout << "----------------------------------------------------------------------------------\n";
+    std::cout << "Assembling " << origin_region.to_string() << " with " << reads.size() << " reads:    (with overlap region = " << padded_region.to_string() << ")\n";
+
+    auto haplotypes = assembler.assemble(reads, ref);
+    if (haplotypes.size() <= 1) return;
+
+    auto likelihoods = pairhmm.compute_likelihoods(haplotypes, reads);
+    auto variants = genetyper.assign_genotype_likelihoods(reads, haplotypes, likelihoods, ref, padded_region, origin_region);
+    for (const auto& variant : variants)
+        os << variant.to_string() << '\n';
 }

@@ -3,6 +3,9 @@
 #include <vector>
 #include "cigar.hpp"
 
+namespace hc
+{
+
 struct SWAligner
 {
 public:
@@ -14,41 +17,23 @@ public:
         int w_extend;
     };
 
-    // match=1, mismatch = -1/3, gap=-(1+k/3)
-    constexpr static SWParameters ORIGINAL_DEFAULT{3, -1, -4, -3};
-    constexpr static SWParameters STANDARD_NGS{25, -50, -110, -6};
-    constexpr static SWParameters NEW_SW_PARAMETERS{200, -150, -260, -11};
-    constexpr static SWParameters ALIGNMENT_TO_BEST_HAPLOTYPE_SW_PARAMETERS{10, -15, -30, -5};
-
-private:
-    enum class State : char
+    struct SWAlignment
     {
-        MATCH = 'M',
-        INSERTION = 'I',
-        DELETION = 'D',
-        CLIP = 'S'
+        std::size_t alignment_begin;
+        Cigar cigar;
     };
 
-public:
-    template <typename Seq>
-    // offset, Cigar
-    std::pair<size_t, Cigar> align(const Seq& ref,
-                                   const Seq& alt,
-                                   const SWParameters& params)
-    {
-        if (ref.empty() || alt.empty())
-            throw std::invalid_argument("Non-null sequences are required for the SW aligner");
-
-        std::vector<std::vector<int>> score(ref.size()+1, std::vector<int>(alt.size()+1, 0));
-        std::vector<std::vector<int>> trace(ref.size()+1, std::vector<int>(alt.size()+1, 0));
-        calculate_matrix(ref, alt, score, trace, params);
-        return calculate_cigar(score, trace);
-    }
+    // match=1, mismatch = -1/3, gap=-(1+k/3)
+    static constexpr SWParameters ORIGINAL_DEFAULT{3, -1, -4, -3};
+    static constexpr SWParameters STANDARD_NGS{25, -50, -110, -6};
+    static constexpr SWParameters NEW_SW_PARAMETERS{200, -150, -260, -11};
+    static constexpr SWParameters ALIGNMENT_TO_BEST_HAPLOTYPE_SW_PARAMETERS{10, -15, -30, -5};
 
 private:
-    template <typename Seq>
-    void calculate_matrix(const Seq& ref,
-                          const Seq& alt,
+    using State = CigarOperator;
+
+    void calculate_matrix(std::string_view ref,
+                          std::string_view alt,
                           std::vector<std::vector<int>>& score,
                           std::vector<std::vector<int>>& trace,
                           const SWParameters& params)
@@ -115,8 +100,8 @@ private:
         }
     }
 
-    std::pair<size_t, Cigar> calculate_cigar(std::vector<std::vector<int>>& score,
-                                             std::vector<std::vector<int>>& trace)
+    auto calculate_cigar(std::vector<std::vector<int>>& score,
+                         std::vector<std::vector<int>>& trace)
     {
         std::size_t ref_size = score.size()-1;
         std::size_t alt_size = score[0].size()-1;
@@ -157,55 +142,71 @@ private:
         Cigar cigar;
         if (segment_length > 0)
         {
-            cigar.emplace_back(segment_length, static_cast<char>(State::CLIP));
+            cigar.emplace_back(segment_length, State::S);
             segment_length = 0;
         }
 
-        auto state = State::MATCH;
+        auto state = State::M;
         do
         {
             int cur_trace = trace[pos_i][pos_j], step_size;
             State new_state;
             if (cur_trace > 0)
             {
-                new_state = State::DELETION;
+                new_state = State::D;
                 step_size = cur_trace;
             }
             else if (cur_trace < 0)
             {
-                new_state = State::INSERTION;
+                new_state = State::I;
                 step_size = -cur_trace;
             }
             else
             {
-                new_state = State::MATCH;
+                new_state = State::M;
                 step_size = 1;
             }
 
             // move to next best location in the sw matrix
             switch (new_state)
             {
-                case State::MATCH:     pos_i--; pos_j--;   break;
-                case State::INSERTION: pos_j -= step_size; break;
-                case State::DELETION:  pos_i -= step_size; break;
+                case State::M: pos_i--; pos_j--;   break;
+                case State::I: pos_j -= step_size; break;
+                case State::D: pos_i -= step_size; break;
                 default: break;
             }
 
             if (new_state == state) segment_length += step_size;
             else
             {
-                cigar.emplace_back(segment_length, static_cast<char>(state));
+                cigar.emplace_back(segment_length, state);
                 segment_length = static_cast<std::size_t>(step_size);
                 state = new_state;
             }
         }
         while (pos_i > 0 && pos_j > 0);
 
-        cigar.emplace_back(segment_length, static_cast<char>(state));
+        cigar.emplace_back(segment_length, state);
         std::size_t alignment_offset = pos_i;
-        if (pos_j > 0) cigar.emplace_back(pos_j, static_cast<char>(State::CLIP));
+        if (pos_j > 0) cigar.emplace_back(pos_j, State::S);
 
-        std::reverse(cigar.begin(), cigar.end());
-        return {alignment_offset, cigar};
+        cigar.reverse();
+        return SWAlignment{alignment_offset, cigar};
+    }
+
+public:
+    auto align(std::string_view ref,
+               std::string_view alt,
+               const SWParameters& params = NEW_SW_PARAMETERS)
+    {
+        if (ref.empty() || alt.empty())
+            throw std::invalid_argument("Non-null sequences are required for the SW aligner");
+
+        std::vector<std::vector<int>> score(ref.size()+1, std::vector<int>(alt.size()+1, 0));
+        std::vector<std::vector<int>> trace(ref.size()+1, std::vector<int>(alt.size()+1, 0));
+        calculate_matrix(ref, alt, score, trace, params);
+        return calculate_cigar(score, trace);
     }
 };
+
+} // hc
