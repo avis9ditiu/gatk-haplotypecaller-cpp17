@@ -1,8 +1,10 @@
-#include "sam.hpp"
-#include "haplotype.hpp"
-#include "interval.hpp"
+#pragma once
+
+#include "../sam/sam.hpp"
+#include "../haplotype/haplotype.hpp"
+#include "../utils/interval.hpp"
+#include "../utils/math_utils.hpp"
 #include <set>
-#include "math_utils.hpp"
 #include <numeric>
 
 namespace hc
@@ -13,8 +15,9 @@ class Genetyper
     static inline const std::string SPAN_DEL = "*";
     static constexpr std::size_t ALLELE_EXTENSION = 2;
     static constexpr std::size_t MAX_GENOTYPE_QUALITY = 99;
-    static constexpr std::size_t MIN_GENOTYPE_QUALITY = 10;
-    static constexpr std::size_t MAX_ALLELE_COUNT = 10;
+    static constexpr std::size_t MIN_HETEROZYGOSITY_QUALITY = 50;
+    static constexpr std::size_t MAX_ALLELE_COUNT = 7;
+
 private:
     static const inline auto allele_index_cache = []{
         std::vector<std::vector<std::pair<std::size_t, std::size_t>>> cache{};
@@ -386,9 +389,10 @@ public:
             auto allele_likelihoods = marginalize(haplotype_mapper, allele_count, reads, haplotype_likelihoods, alleles_loc.expand_within_contig(ALLELE_EXTENSION));
             auto genotype_likelihoods = calculate_genotype_likelihoods(allele_likelihoods, allele_count);
             auto [genotype_index, genotype_quality] = get_genotype_quality_and_max_genotype_index(genotype_likelihoods);
-            if (genotype_index == 0 || genotype_quality < MIN_GENOTYPE_QUALITY) continue;
+            if (genotype_index == 0) continue;
             auto genotype = get_genotype(allele_count, genotype_index);
-            variants.push_back(Variant{.location=alleles_loc, .alleles=alleles, .GT=genotype, .GQ=genotype_quality});
+            if (genotype.first == 0 && genotype_quality < MIN_HETEROZYGOSITY_QUALITY) continue;
+            variants.emplace_back(std::move(alleles_loc), std::move(alleles), genotype, genotype_quality);
         }
         return variants;
     }

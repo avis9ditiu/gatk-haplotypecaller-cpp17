@@ -1,7 +1,7 @@
 #pragma once
 
 #include <vector>
-#include "cigar.hpp"
+#include "../sam/cigar.hpp"
 
 namespace hc
 {
@@ -17,20 +17,47 @@ public:
         int w_extend;
     };
 
-    struct SWAlignment
-    {
-        std::size_t alignment_begin;
-        Cigar cigar;
-    };
-
     // match=1, mismatch = -1/3, gap=-(1+k/3)
     static constexpr SWParameters ORIGINAL_DEFAULT{3, -1, -4, -3};
     static constexpr SWParameters STANDARD_NGS{25, -50, -110, -6};
     static constexpr SWParameters NEW_SW_PARAMETERS{200, -150, -260, -11};
     static constexpr SWParameters ALIGNMENT_TO_BEST_HAPLOTYPE_SW_PARAMETERS{10, -15, -30, -5};
 
+    static constexpr std::size_t MINIMAL_MISMATCH_TO_TOLERANCE = 2;
 private:
     using State = CigarOperator;
+
+public:
+    // offset, Cigar
+    std::pair<size_t, Cigar> align(std::string_view ref,
+                                   std::string_view alt,
+                                   const SWParameters& params = NEW_SW_PARAMETERS)
+    {
+        if (ref.empty() || alt.empty())
+            throw std::invalid_argument("Non-null sequences are required for the SW aligner");
+
+        if (is_all_match(ref, alt))
+            return {0, {1, {ref.size(), CigarOperator::M}}};
+
+        std::vector<std::vector<int>> score(ref.size()+1, std::vector<int>(alt.size()+1, 0));
+        std::vector<std::vector<int>> trace(ref.size()+1, std::vector<int>(alt.size()+1, 0));
+        calculate_matrix(ref, alt, score, trace, params);
+        return calculate_cigar(score, trace);
+    }
+
+private:
+    bool is_all_match(std::string_view ref, std::string_view alt) const
+    {
+        if (alt.size() == ref.size())
+        {
+            std::size_t mismatch = 0;
+            for (std::size_t i = 0; mismatch <= MINIMAL_MISMATCH_TO_TOLERANCE && i < ref.size(); i++)
+                if (alt[i] != ref[i])
+                    mismatch++;
+            return mismatch <= MINIMAL_MISMATCH_TO_TOLERANCE;
+        }
+        return false;
+    }
 
     void calculate_matrix(std::string_view ref,
                           std::string_view alt,
@@ -86,22 +113,22 @@ private:
                     score[i][j] = step_diag;
                     trace[i][j] = 0;
                 }
-                else if (step_down >= step_right)
-                {
-                    score[i][j] = step_down;
-                    trace[i][j] = step_down_size;
-                }
-                else
+                else if (step_right >= step_down)
                 {
                     score[i][j] = step_right;
                     trace[i][j] = -step_right_size;
+                }
+                else
+                {
+                    score[i][j] = step_down;
+                    trace[i][j] = step_down_size;
                 }
             }
         }
     }
 
-    auto calculate_cigar(std::vector<std::vector<int>>& score,
-                         std::vector<std::vector<int>>& trace)
+    std::pair<size_t, Cigar> calculate_cigar(std::vector<std::vector<int>>& score,
+                                             std::vector<std::vector<int>>& trace)
     {
         std::size_t ref_size = score.size()-1;
         std::size_t alt_size = score[0].size()-1;
@@ -191,21 +218,7 @@ private:
         if (pos_j > 0) cigar.emplace_back(pos_j, State::S);
 
         cigar.reverse();
-        return SWAlignment{alignment_offset, cigar};
-    }
-
-public:
-    auto align(std::string_view ref,
-               std::string_view alt,
-               const SWParameters& params = NEW_SW_PARAMETERS)
-    {
-        if (ref.empty() || alt.empty())
-            throw std::invalid_argument("Non-null sequences are required for the SW aligner");
-
-        std::vector<std::vector<int>> score(ref.size()+1, std::vector<int>(alt.size()+1, 0));
-        std::vector<std::vector<int>> trace(ref.size()+1, std::vector<int>(alt.size()+1, 0));
-        calculate_matrix(ref, alt, score, trace, params);
-        return calculate_cigar(score, trace);
+        return {alignment_offset, cigar};
     }
 };
 

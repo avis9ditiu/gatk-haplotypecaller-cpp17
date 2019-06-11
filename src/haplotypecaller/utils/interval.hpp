@@ -2,6 +2,7 @@
 
 #include <string>
 #include <stdexcept>
+#include <tuple>
 
 namespace hc
 {
@@ -89,6 +90,7 @@ struct Interval
 
     friend bool operator==(const Interval& lhs, const Interval& rhs)
     { return std::tie(lhs.contig, lhs.begin, lhs.end) == std::tie(rhs.contig, rhs.begin, rhs.end); }
+
 };
 
 } // hc

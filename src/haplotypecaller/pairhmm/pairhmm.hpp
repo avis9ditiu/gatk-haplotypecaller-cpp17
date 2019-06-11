@@ -4,9 +4,9 @@
 #include <vector>
 #include <array>
 #include <cmath>
-#include "haplotype.hpp"
-#include "sam.hpp"
-#include "quality_utils.hpp"
+#include "../haplotype/haplotype.hpp"
+#include "../sam/sam.hpp"
+#include "../utils/quality_utils.hpp"
 
 namespace hc
 {

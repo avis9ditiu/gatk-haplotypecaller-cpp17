@@ -6,7 +6,7 @@
 #include <string_view>
 #include <stdexcept>
 
-namespace biovoltron::format
+namespace hc
 {
 
 struct Fasta

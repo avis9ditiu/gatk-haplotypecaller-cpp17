@@ -4,12 +4,15 @@
 #include <limits>
 #include <boost/graph/adjacency_list.hpp>
 #include <boost/graph/depth_first_search.hpp>
+#include <boost/graph/filtered_graph.hpp>
 #include <vector>
 #include <map>
-#include "sam.hpp"
-#include "haplotype.hpp"
+#include "../sam/sam.hpp"
+#include "../haplotype/haplotype.hpp"
 #include <iostream>
-#include "smithwaterman.hpp"
+#include <fstream>
+#include "../smithwaterman/intel_smithwaterman.hpp"
+#include "../utils/quality_utils.hpp"
 
 namespace hc
 {
@@ -17,7 +20,8 @@ namespace hc
 struct GraphWrapper
 {
     static constexpr std::size_t DEFAULT_NUM_PATHS = 128;
-    static constexpr bool INCREASE_COUNTS_BACKWARDS = false;
+    static constexpr char MIN_BASE_QUALITY_TO_USE = 10 + QualityUtils::ASCII_OFFSET;
+    static constexpr std::size_t PRUNE_FACTOR = 2;
 
 private:
     struct VertexProperty {
@@ -40,9 +44,7 @@ private:
 
     struct cycle_detector : public boost::dfs_visitor<>
     {
-        cycle_detector( bool& has_cycle)
-            : _has_cycle(has_cycle) { }
-
+        cycle_detector(bool& has_cycle) : _has_cycle(has_cycle) {}
         template <class Edge, class Graph>
         void back_edge(Edge, Graph&) {
             _has_cycle = true;
@@ -51,10 +53,16 @@ private:
         bool& _has_cycle;
     };
 
+    struct EdgeFilter
+    {
+        bool operator()(Edge e) const
+        { return (*g)[e].is_ref || (*g)[e].count >= PRUNE_FACTOR || boost::out_degree(boost::source(e, *g), *g) == 1; }
+        Graph* g;
+    } filter{&g};
+
     std::size_t kmer_size;
     Graph g;
     Vertex source{}, sink{};
-    std::size_t prune_factor = 2;
     std::vector<Path> paths;
     std::set<Vertex> vertices_on_paths;
 
@@ -63,20 +71,6 @@ private:
 
     std::set<std::string_view> dup_kmers;
     std::map<std::string_view, Vertex> unique_kmers;
-
-    char min_base_quality_to_use;
-    bool allow_duplicate_kmers_in_ref;
-
-    bool is_start(std::string_view kmer) const
-    { return dup_kmers.find(kmer) == dup_kmers.end(); }
-
-    auto get_start(std::string_view seq) const
-    {
-        for (std::size_t i = 0; i < seq.size()-kmer_size; i++)
-            if (is_start(seq.substr(i, kmer_size)))
-                return i;
-        return std::string_view::npos;
-    }
 
     auto create_edge(Vertex u, Vertex v, bool is_ref)
     {
@@ -94,10 +88,8 @@ private:
         return v;
     }
 
-    auto get_vertex(std::string_view kmer, bool allow_ref_source)
+    auto get_vertex(std::string_view kmer)
     {
-        if (!allow_ref_source && kmer == g[source].kmer)
-            return create_vertex(kmer);
         if (auto it = unique_kmers.find(kmer); it != unique_kmers.end())
             return it->second;
         return create_vertex(kmer);
@@ -132,23 +124,17 @@ private:
             }
         }
 
-        auto v = get_vertex(kmer, false);
+        auto v = get_vertex(kmer);
         create_edge(u, v, is_ref);
         return v;
     }
 
     void add_seq(std::string_view seq, bool is_ref)
     {
-        auto start = is_ref ? 0 : get_start(seq);
-        if (start == std::string_view::npos) return;
-
-        auto v = get_vertex(seq.substr(start, kmer_size), true);
-
-        if (INCREASE_COUNTS_BACKWARDS)
-            increase_counts_backwards(v, seq.substr(start, kmer_size-1));
-
+        auto v = get_vertex(seq.substr(0, kmer_size));
+        increase_counts_backwards(v, seq.substr(0, kmer_size-1));
         if (is_ref) source = v;
-        for (auto i = start+1; i <= seq.size()-kmer_size; i++)
+        for (auto i = 1; i <= seq.size()-kmer_size; i++)
             v = extend_chain(v, seq.substr(i, kmer_size), is_ref);
         if (is_ref) sink = v;
     }
@@ -165,7 +151,7 @@ private:
         {
             for (auto e : boost::make_iterator_range(boost::out_edges(from, g)))
             {
-                if (g[e].is_ref || g[e].count >= prune_factor)
+                if (g[e].is_ref || g[e].count >= PRUNE_FACTOR || boost::out_degree(from, g) == 1)
                 {
                     auto v = target(e, g);
                     if (std::find(path.begin(), path.end(), v) == path.end())
@@ -239,17 +225,25 @@ private:
         if (haplotypes.size() > DEFAULT_NUM_PATHS)
             haplotypes.erase(haplotypes.begin() + DEFAULT_NUM_PATHS, haplotypes.end());
         if (haplotypes.size() > 1)
-            std::cout << "Found " << haplotypes.size() << " candidate haplotypes of " << haplotypes.size() << " possible combinations to evaluate every read against.\n";
+            std::cout << "Found " << haplotypes.size() << " candidate haplotypes.\n";
         else
             std::cout << "Found only the reference haplotype in the assembly graph.\n";
 
-        SWAligner aligner;
+        IntelSWAligner aligner;
         for (auto& h : haplotypes)
         {
             auto [alignment_begin, cigar] = aligner.align(ref, h.bases);
+            // std::cout << "Adding haplotype " << cigar << " from graph with kmer " << kmer_size << '\n';
             h.alignment_begin_wrt_ref = alignment_begin;
             h.cigar = std::move(cigar);
         }
+
+        // for (auto& h : haplotypes)
+        // {
+        //     std::cout << h.bases << '\n';
+        //     std::cout << "> Cigar = " << h.cigar << " score " << h.score << '\n';
+        // }
+
         return haplotypes;
     }
 
@@ -266,10 +260,7 @@ public:
         return dup_kmers;
     }
 
-    GraphWrapper(std::size_t kmer_size, char min_base_quality_to_use, bool allow_duplicate_kmers_in_ref)
-        : kmer_size(kmer_size),
-          min_base_quality_to_use(min_base_quality_to_use),
-          allow_duplicate_kmers_in_ref(allow_duplicate_kmers_in_ref) {}
+    GraphWrapper(std::size_t kmer_size) : kmer_size(kmer_size) {}
 
     void set_ref(std::string_view ref) { this->ref = ref; }
     void set_read(const SAMRecord& read)
@@ -278,10 +269,12 @@ public:
         const auto& qual = read.QUAL;
 
         auto start = std::string_view::npos;
-        auto is_usable = [this](auto qual){ return qual >= min_base_quality_to_use; };
+        auto is_usable = [this](auto base, auto qual){ 
+            return base != 'N' && qual >= MIN_BASE_QUALITY_TO_USE; 
+        };
         for (std::size_t i = 0; i <= seq.size(); i++)
         {
-            if (i == seq.size() || !is_usable(qual[i]))
+            if (i == seq.size() || !is_usable(seq[i], qual[i]))
             {
                 if (start != std::string_view::npos && i-start >= kmer_size)
                     read_segs.push_back(seq.substr(start, i-start));
@@ -294,9 +287,8 @@ public:
 
     void build()
     {
-        if (allow_duplicate_kmers_in_ref)
-            for (auto kmer : get_dup_kmers(ref, kmer_size))
-                dup_kmers.insert(kmer);
+        for (auto kmer : get_dup_kmers(ref, kmer_size))
+            dup_kmers.insert(kmer);
 
         for (auto seg : read_segs)
             for (auto kmer : get_dup_kmers(seg, kmer_size))
@@ -311,18 +303,25 @@ public:
     {
         bool has_cycle = false;
         cycle_detector vis(has_cycle);
-        boost::depth_first_search(g, boost::visitor(vis));
+        boost::filtered_graph<Graph, EdgeFilter> fg(g, filter);
+        boost::depth_first_search(fg, boost::visitor(vis));
         return has_cycle;
     }
-
-    bool is_low_complexity() const
-    { return dup_kmers.size() * 4 > unique_kmers.size(); }
 
     auto unique_kmers_count() const
     { return unique_kmers.size(); }
 
-    void print(std::ostream& os)
+    auto find_paths()
     {
+        find_all_paths();
+        mark_edges_on_paths();
+        compute_edges_score();
+        return get_haplotypes();
+    }
+
+    void print() const
+    {
+        std::ofstream os("graph.dot");
         os << "digraph assembly_graphs {";
         for (auto e : boost::make_iterator_range(boost::edges(g)))
         {
@@ -330,7 +329,7 @@ public:
             auto count = g[e].count;
             if (g[e].is_ref)
                 os << "[label=" << count << ",color=red];\n";
-            else if (count < prune_factor)
+            else if (count < PRUNE_FACTOR)
                 os << "[label=" << count << ",style=dotted,color=grey];\n";
             else os << "[label=" << count << "];\n";
         }
@@ -344,14 +343,6 @@ public:
             else os << "[label=" << kmer.back() << ",shape=box]\n";
         }
         os << "}";
-    }
-
-    auto find_paths()
-    {
-        find_all_paths();
-        mark_edges_on_paths();
-        compute_edges_score();
-        return get_haplotypes();
     }
 };
 

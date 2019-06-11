@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sam.hpp"
+#include "../sam/sam.hpp"
 
 namespace hc
 {
@@ -26,7 +26,7 @@ struct SecondaryAlignmentReadFilter
 
 struct MinimumLengthReadFilter
 {
-    static constexpr std::size_t MINIMUM_READ_LENGTH_AFTER_TRIMMING = 25;
+    static constexpr std::size_t MINIMUM_READ_LENGTH_AFTER_TRIMMING = 10;
     bool operator()(const SAMRecord& record) const
     { return record.size() < MINIMUM_READ_LENGTH_AFTER_TRIMMING; }
 };

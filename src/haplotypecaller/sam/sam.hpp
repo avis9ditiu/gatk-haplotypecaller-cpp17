@@ -7,7 +7,9 @@
 #include <boost/serialization/vector.hpp>
 #include <ostream>
 #include <istream>
-#include "interval.hpp"
+#include "../utils/interval.hpp"
+#include <cmath>
+#include <limits>
 
 namespace hc
 {
@@ -25,6 +27,9 @@ struct SAMRecord
     std::int32_t  TLEN;
     std::string   SEQ;
     std::string   QUAL;
+    static constexpr std::size_t MAX_READ_LENGTH = 200;
+    static inline const std::string GOP = std::string(MAX_READ_LENGTH, 'I');
+    static inline const std::string GCP = std::string(MAX_READ_LENGTH, '+');
 
     bool READ_PAIRED()                     const {return (FLAG & 0x1  ) != 0;}
     bool PROPER_PAIR()                     const {return (FLAG & 0x2  ) != 0;}
@@ -38,6 +43,10 @@ struct SAMRecord
     bool READ_FAILS_VENDOR_QUALITY_CHECK() const {return (FLAG & 0x200) != 0;}
     bool DUPLICATE_READ()                  const {return (FLAG & 0x400) != 0;}
     bool SUPPLEMENTARY_ALIGNMENT()         const {return (FLAG & 0x800) != 0;}
+
+    auto insertionGOP() const { return std::string_view{GOP}.substr(0, SEQ.size()); }
+    auto deletionGOP()  const { return std::string_view{GOP}.substr(0, SEQ.size()); }
+    auto overallGCP()   const { return std::string_view{GCP}.substr(0, SEQ.size()); }
 
     template <typename Archive>
     void serialize(Archive& ar, const unsigned int version)
@@ -58,8 +67,18 @@ struct SAMRecord
     bool empty() const { return SEQ.empty(); }
     auto size()  const { return SEQ.size(); }
     auto get_alignment_begin() const { return POS - 1; }
-    auto get_alignment_end()   const { return get_alignment_begin() + CIGAR.get_reference_length(); }
+    auto get_mate_alignment_begin() const { return PNEXT - 1; }
+    auto get_alignment_end() const { return get_alignment_begin() + CIGAR.get_reference_length(); }
     auto get_interval() const { return Interval(RNAME, get_alignment_begin(), get_alignment_end()); }
+    bool has_well_defined_fragment_size() const
+    {
+        if (TLEN == 0) return false;
+        if (!READ_PAIRED()) return false;
+        if (READ_UNMAPPED() || MATE_UNMAPPED()) return false;
+        if (READ_REVERSE_STRAND() == MATE_REVERSE_STRAND()) return false;
+        if (READ_REVERSE_STRAND()) return get_alignment_end() > get_mate_alignment_begin() + 1;
+        return get_alignment_begin() <= get_mate_alignment_begin() + TLEN;
+    }
 };
 
 auto& operator<<(std::ostream& os, const SAMRecord& record)

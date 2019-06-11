@@ -139,8 +139,6 @@ public:
         return cigar_string;
     }
 
-    bool empty() const noexcept { return cigar_elements.empty(); }
-
     auto begin()
     { return cigar_elements.begin(); }
 
