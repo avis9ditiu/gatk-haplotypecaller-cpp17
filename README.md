@@ -1,5 +1,5 @@
 ## Introduction
-This Hardware-friendly version of GATK4 HaplotypeCaller.
+Hardware-friendly version of GATK4 HaplotypeCaller.
 
 ## Getting started
 
