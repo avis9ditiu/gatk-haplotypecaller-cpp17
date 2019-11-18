@@ -1,5 +1,5 @@
 ## Introduction
-This is my c++17 implementation of hardware-friendly version of GATK4 HaplotypeCaller.
+This Hardware-friendly version of GATK4 HaplotypeCaller.
 
 ## Getting started
 
